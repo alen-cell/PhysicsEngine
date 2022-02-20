@@ -1,0 +1,318 @@
+﻿
+
+#pragma kernel ClearHashGrid
+#pragma kernel RecalculateHashGrid
+#pragma kernel BuildNeighbourList
+#pragma kernel ComputeDensityPressure
+#pragma kernel ComputeForces
+#pragma kernel Integrate
+#pragma enable_d3d11_debug_symbols
+
+float CellSize;
+int Dimensions;
+
+int3 GetCell(float3 position) {
+    return int3(position.x / CellSize, position.y / CellSize, position.z / CellSize);
+
+}
+int GetGridCellIndex(float3 position) {
+    int3 Cellposition = int3(position.x / CellSize, position.y / CellSize, position.z / CellSize);
+    return Cellposition.x + Dimensions * (Cellposition.y + Dimensions * Cellposition.z);
+}
+
+int Hash(int3 cell) {
+    return cell.x + Dimensions * (cell.y + Dimensions * cell.z);
+}
+
+struct Particle {
+    float3 position;
+    float4 Color;
+};
+
+RWStructuredBuffer<Particle> _particles;
+RWStructuredBuffer<int> _neighbourList;
+RWStructuredBuffer<int> _neighbourTracker;
+RWStructuredBuffer<uint> _hashGrid;
+RWStructuredBuffer<uint> _hashGridTracker;
+RWStructuredBuffer<float> _densities;
+RWStructuredBuffer<float> _pressures;
+RWStructuredBuffer<float3> _velocities;
+RWStructuredBuffer<float3> _forces;
+
+
+int maximumParticlesPerCell;
+float radius;
+float radius2;
+float radius3;
+float radius4;
+float radius5;
+float mass;
+float mass2;
+float gasConstant;
+float restDensity;
+float viscosityCoefficient;
+float damping;
+float dt;
+float3 gravity;
+float epsilon;
+float pi;
+float stiffness;
+//float3 velocities[];
+
+[numthreads(100,1,1)]
+void ClearHashGrid(uint3 id : SV_DispatchThreadID)
+{
+    // TODO: insert actual code here!
+    _hashGridTracker[id.x] = 0;
+   
+}
+
+
+[numthreads(100,1,1)]//TODO使用3x3x3矩阵
+void RecalculateHashGrid(uint3 id:SV_DispatchThreadID) {
+    int previousCount = 0;
+    const int hashCellIdx = Hash(GetCell(_particles[id.x].position));
+    InterlockedAdd(_hashGridTracker[hashCellIdx], 1, previousCount);
+    if (previousCount >= maximumParticlesPerCell)
+    {
+        return;
+    }
+    _hashGrid[hashCellIdx * maximumParticlesPerCell + previousCount] = id.x;
+}
+
+void GetNearbyKeys(int3 originIndex,float3 position, out int nearbyKeys[8]) 
+{
+    int3 nearbyBucketIndices[8];
+    for (int i = 0; i < 8; i++) {
+        nearbyBucketIndices[i] = originIndex;
+    }
+
+
+    if ((originIndex.x + 0.5f) * CellSize <= position.x) {
+        
+        nearbyBucketIndices[4].x += 1;
+        nearbyBucketIndices[5].x += 1;
+        nearbyBucketIndices[6].x += 1;
+        nearbyBucketIndices[7].x += 1;
+
+    }
+
+    else
+    {
+        nearbyBucketIndices[4].x -= 1;
+        nearbyBucketIndices[5].x -= 1;
+        nearbyBucketIndices[6].x -= 1;
+        nearbyBucketIndices[7].x -= 1;
+    }
+    if ((originIndex.y + 0.5f) * CellSize <= position.y) {
+        nearbyBucketIndices[2].y += 1;
+        nearbyBucketIndices[3].y += 1;
+        nearbyBucketIndices[6].y += 1;
+        nearbyBucketIndices[7].y += 1;
+    }
+    else
+    {
+        nearbyBucketIndices[2].y -= 1;
+        nearbyBucketIndices[3].y -= 1;
+        nearbyBucketIndices[6].y -= 1;
+        nearbyBucketIndices[7].y -= 1;
+    }
+    if ((originIndex.z + 0.5f) * CellSize <= position.z) {
+        nearbyBucketIndices[1].z += 1;
+        nearbyBucketIndices[3].z += 1;
+        nearbyBucketIndices[5].z += 1;
+        nearbyBucketIndices[7].z += 1;
+    }
+    else
+    {
+        nearbyBucketIndices[1].z -= 1;
+        nearbyBucketIndices[3].z -= 1;
+        nearbyBucketIndices[5].z -= 1;
+        nearbyBucketIndices[7].z -= 1;
+    }
+
+    for (int j = 0; j < 8; j++) {
+        int3 nbcellIndex = nearbyBucketIndices[j];
+        if (nbcellIndex.x < 0 || nbcellIndex.x >= Dimensions || nbcellIndex.y < 0 || nbcellIndex.y >= Dimensions || nbcellIndex.z < 0 || nbcellIndex.z >= Dimensions) {
+            nearbyKeys[j] = -1;
+        }
+        else {
+            nearbyKeys[j] = Hash(nearbyBucketIndices[j]);
+        }
+    }
+}
+
+[numthreads(100, 1, 1)]
+void BuildNeighbourList(uint3 id : SV_DispatchThreadID)
+{
+    _neighbourTracker[id.x] = 0;
+    const int3 cell = GetCell(_particles[id.x].position);
+    int cells[8];
+    GetNearbyKeys(cell, _particles[id.x].position, cells);
+
+    for (uint j = 0; j < 8; j++)
+    {
+        if (cells[j] == -1) continue; // Grid does not contain cell.
+        const uint numberOfParticlesInCell = min(_hashGridTracker[cells[j]], maximumParticlesPerCell); ;
+        for (uint index = 0; index < numberOfParticlesInCell; index++)
+        {
+            const uint potentialNeighbour = _hashGrid[cells[j] * maximumParticlesPerCell + index];
+            if (potentialNeighbour == id.x) continue;
+            const float3 v = _particles[potentialNeighbour].position - _particles[id.x].position;
+            if (dot(v, v) < radius2) // Use squared length (= dot) instead of length for performance.
+            {
+                _neighbourList[id.x * maximumParticlesPerCell * 8 + _neighbourTracker[id.x]++] = potentialNeighbour;
+            }
+        }
+    }
+    // n. The Neighbouring-list should be n-particles big, each index containing a list of each particles neighbours in radius r.
+}
+
+float Wpoly6Kernel(float distanceSquared)
+{
+    float x = 1.0f - distanceSquared / radius2;
+    return 315.f / (64.f * pi * radius3) * x * x * x;
+}
+
+[numthreads(100,1,1)]//合并
+void ComputeDensityPressure(uint3 id :SV_DispatchThreadID)
+{   
+    float3 origin = _particles[id.x].position;
+    float sum = 0.f;
+    for(int j = 0;j <_neighbourTracker[id.x]; j++)
+{       
+        int neighbourIndex = _neighbourList[id.x*maximumParticlesPerCell*8 +j];
+        const float3 diff = origin - _particles[neighbourIndex].position;
+        float distanceSquared = dot(diff,diff);
+        sum += Wpoly6Kernel(distanceSquared);
+}
+//computeDensity
+//     //Debug
+   // _densities[id.x] = _neighbourTracker[id.x];
+    //TodO presure
+ _densities[id.x] = sum*mass + 0.000001f;
+ _densities[id.x] = max(restDensity, _densities[id.x]);
+ _pressures[id.x] =  gasConstant * (_densities[id.x] - restDensity);
+
+
+}
+
+[numthreads(100, 1, 1)]//WithSmallSteps
+void ComputeWCSPHDensityPressure(uint3 id :SV_DispatchThreadID)
+{
+    float3 origin = _particles[id.x].position;
+    float sum = 0.f;
+    for (int j = 0; j < _neighbourTracker[id.x]; j++)
+    {
+        int neighbourIndex = _neighbourList[id.x * maximumParticlesPerCell * 8 + j];
+        const float3 diff = origin - _particles[neighbourIndex].position;
+        float distanceSquared = dot(diff, diff);
+        sum += Wpoly6Kernel(distanceSquared);
+    }
+    
+    _densities[id.x] = sum * mass + 0.000001f;
+    _densities[id.x] = max(restDensity, _densities[id.x]);
+    //_pressures[id.x] = gasConstant * (_densities[id.x] - restDensity);
+    _pressures[id.x] = stiffness * pow((_densities[id.x] / restDensity - 1), 7);
+
+}
+
+
+
+float SpikyKernelFirstDerivative(float distance)
+{ 
+    float x = 1.0f - distance / radius;
+    return -45.0f / (pi * radius4) * x * x;
+}
+
+float SpikyKernelSecondDerivative(float distance)
+{
+    float x = 1.0f - distance / radius;
+    return 90.0f / (pi * radius5) * x;
+}
+
+float3 SpikyKernelGradient(float distance, float3 directionFromCenter) {
+    return SpikyKernelFirstDerivative(distance) * directionFromCenter;
+}
+
+[numthreads(100,1,1)]
+void ComputeForces(uint3 id :SV_DispatchThreadID){
+    _forces[id.x] = float3(0, 0, 0);
+    const float particleDensity2 = _densities[id.x] * _densities[id.x];
+    for (int j = 0; j < _neighbourTracker[id.x]; j++)
+    {
+        const int neighbourIndex = _neighbourList[id.x * maximumParticlesPerCell * 8 + j];
+        const float distance = length(_particles[id.x].position - _particles[neighbourIndex].position);
+            if (distance > 0.0f) {
+                const float3 direction = (_particles[id.x].position - _particles[neighbourIndex].position) / distance;
+                //pressure gradient force 
+                //d//ebug
+                _forces[id.x] -= mass2*(_pressures[id.x] / particleDensity2 + _pressures[neighbourIndex] / (_densities[neighbourIndex] * _densities[neighbourIndex]))*SpikyKernelGradient(distance, direction);
+               // tension -= _Particles[n]._mass * _Particles[n]._inv_density * LaplacianKernelPoly6(relativePos);
+                //_forces[id.x] -= mass2 * 0.5*((_pressures[id.x]  + _pressures[neighbourIndex])/ (_densities[neighbourIndex] * _densities[neighbourIndex])) * SpikyKernelGradient(distance, direction);
+                _forces[id.x] += viscosityCoefficient * mass2 * ((_velocities[neighbourIndex] - _velocities[id.x]) / _densities[neighbourIndex] )* SpikyKernelSecondDerivative(distance);
+            }
+    }
+    _forces[id.x] += gravity;
+
+}
+
+
+
+[numthreads(100,1,1)]
+void Integrate(uint3 id :SV_DispatchThreadID)
+{
+    Particle particle = _particles[id.x];
+    _velocities[id.x] += dt* _forces[id.x]/mass;
+    particle.position += dt* _velocities[id.x];
+
+    _particles[id.x] = particle;
+
+    float3 velocity = _velocities[id.x];
+    //Boundary
+    if (_particles[id.x].position.x - epsilon < 0.0f)
+    {
+        velocity.x *= damping;
+        particle.position.x = epsilon;
+
+    }
+    else if (_particles[id.x].position.x + epsilon > Dimensions - 1.f)
+    {
+        velocity.x *= damping;
+        particle.position.x = Dimensions - 1 - epsilon;
+    }
+    if (_particles[id.x].position.y - epsilon < 0.0f)
+    {
+        velocity.y *= damping;
+        particle.position.y = epsilon;
+
+    }
+    else if (_particles[id.x].position.y + epsilon > Dimensions - 1.f)
+    {
+        velocity.y *= damping;
+        particle.position.y = Dimensions - 1 - epsilon;
+    }
+    if (_particles[id.x].position.z - epsilon < 0.0f)
+    {
+        velocity.z *= damping;
+        particle.position.z = epsilon;
+
+    }
+    else if (_particles[id.x].position.z + epsilon > Dimensions - 1.f)
+    {
+        velocity.z *= damping;
+        particle.position.z = Dimensions - 1 - epsilon;
+    }
+
+    //Debug
+  /*  float3[] velocities = new float3[1000];
+    velocities[id.x] = _velocities[id.x];*/
+    _velocities[id.x] = velocity;
+    _particles[id.x] = particle;
+
+}
+
+[numthreads(100,1,1)]
+void BuildCollider() {
+
+}
