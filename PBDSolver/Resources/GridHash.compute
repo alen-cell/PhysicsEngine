@@ -1,0 +1,81 @@
+﻿
+#define THERADS 128
+
+int NumParticles;
+int TotalParticles;
+float HashScale;
+int3 Dimensions;
+float3 HashTranslate;
+struct Particle {
+    float3 position;
+    float4 colorGradient;
+    float3 velocity;
+    float3 forces;
+    float density;
+    float mass;
+    float pressure;
+
+};
+StructuredBuffer<Particle> Particles;
+StructuredBuffer<float4>Boundary;
+RWStructuredBuffer<int2>IndexMap;
+RWStructuredBuffer<int2>Table;
+
+
+int Hash(float3 position){
+position = (position-HashTranslate)*HashScale;
+int3 i= clamp(position,0,Dimensions-1);
+
+return position.x + Dimensions.x*(position.y+Dimensions.y*position.z);
+
+
+}
+#pragma kernel HashParticles
+[numthreads(THERADS,1,1)]
+void HashParticles(int id:SV_DISPATCHTHREADID)
+{
+	int2 index;
+	index.y = id;
+
+	if(id < NumParticles)
+	{
+	//ParticlesPosition 分开
+		index.x = Hash(Particles[id].position.xyz);
+		IndexMap[id] = index;	
+
+	}
+	else if (id < TotalParticles){
+		int k = id- NumParticles;
+		index.x = Hash(Boundary[k].xyz);
+		IndexMap[id] = index;
+	}
+
+}
+
+
+#pragma kernel ClearTable
+[numthreads(THERADS,1,1)]
+void ClearTable(int id:SV_DISPATCHTHREADID)
+{
+	if(id<TotalParticles)
+	Table[id] = 0;
+}
+
+#pragma kernel MapTable
+
+[numthreads(THERADS,1,1)]
+void MapTable(int id:SV_DISPATCHTHREADID){
+	if(id<TotalParticles)
+	{
+
+		int hash = IndexMap[id].x;
+		
+		if(id==0||hash !=IndexMap[id-1].x)
+			Table[hash].x = id;
+
+		if(id==TotalParticles-1||hash!= IndexMap[id+1].x)
+			Table[hash].y = id;
+	}
+
+
+}

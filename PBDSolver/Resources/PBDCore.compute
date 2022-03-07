@@ -1,0 +1,361 @@
+﻿
+
+#pragma kernel ClearHashGrid
+#pragma kernel RecalculateHashGrid
+#pragma kernel BuildNeighbourList
+#pragma kernel ComputeDensityPressure
+#pragma kernel ComputeForces
+#pragma kernel Integrate
+
+
+float CellSize;
+int Dimensions;
+
+int3 GetCell(float3 position) {
+    return int3(position.x / CellSize, position.y / CellSize, position.z / CellSize);
+
+}
+int GetGridCellIndex(float3 position) {
+    int3 Cellposition = int3(position.x / CellSize, position.y / CellSize, position.z / CellSize);
+    return Cellposition.x + Dimensions * (Cellposition.y + Dimensions * Cellposition.z);
+}
+
+int Hash(int3 cell) {
+    return cell.x + Dimensions * (cell.y + Dimensions * cell.z);
+}
+//与脚本顺序要一致
+struct Particle {
+    float3 position;
+    float4 colorGradient;
+    float3 velocity;
+    float3 forces;
+    float density;
+    float mass;
+    float pressure;
+
+};
+
+struct SolidParticle
+{
+    float3 position;
+    float3 velocity;
+    float3 forces;
+    float density;
+    float mass;
+    float pressure;
+    
+
+};
+
+
+
+RWStructuredBuffer<Particle> _particles;
+RWStructuredBuffer<SolidParticle> _boundaryParticles;
+RWStructuredBuffer<int> _neighbourList;
+RWStructuredBuffer<int> _neighbourTracker;
+RWStructuredBuffer<uint> _hashGrid;
+RWStructuredBuffer<uint> _hashGridTracker;
+RWStructuredBuffer<uint> _test;
+int maximumParticlesPerCell;
+
+int totalParticles;
+
+float radius;
+float radius2;
+float radius3;
+float radius4;
+float radius5;
+float gasConstant;
+float restDensity;
+float viscosityCoefficient;
+float damping;
+float dt;
+float3 gravity;
+float epsilon;
+float pi;
+float stiffness;
+float solidPressure;
+float numberofBoundaryParticles;
+
+//float3 velocities[];
+
+[numthreads(100, 1, 1)]
+void ClearHashGrid(uint3 id : SV_DispatchThreadID)
+{
+    // TODO: insert actual code here!
+    _hashGridTracker[id.x] = 0;
+    
+
+}
+
+
+
+
+[numthreads(100, 1, 1)]//TODO使用3x3x3矩阵
+void RecalculateHashGrid(uint3 id:SV_DispatchThreadID) {
+    int previousCount = 0;
+    const int hashCellIdx = Hash(GetCell(_particles[id.x].position));
+    //const int BoundaryhashCellIdx = Hash(GetCell(_boundaryParticles[id.x].position));
+    InterlockedAdd(_hashGridTracker[hashCellIdx], 1, previousCount);
+       
+    if (previousCount >= maximumParticlesPerCell)
+    {
+        return;
+    }
+    _hashGrid[hashCellIdx * maximumParticlesPerCell + previousCount] = id.x;
+}
+
+void GetNearbyKeys(int3 originIndex, float3 position, out int nearbyKeys[8])
+{
+    int3 nearbyBucketIndices[8];
+    for (int i = 0; i < 8; i++) {
+        nearbyBucketIndices[i] = originIndex;
+    }
+
+
+    if ((originIndex.x + 0.5f) * CellSize <= position.x) {
+
+        nearbyBucketIndices[4].x += 1;
+        nearbyBucketIndices[5].x += 1;
+        nearbyBucketIndices[6].x += 1;
+        nearbyBucketIndices[7].x += 1;
+
+    }
+
+    else
+    {
+        nearbyBucketIndices[4].x -= 1;
+        nearbyBucketIndices[5].x -= 1;
+        nearbyBucketIndices[6].x -= 1;
+        nearbyBucketIndices[7].x -= 1;
+    }
+    if ((originIndex.y + 0.5f) * CellSize <= position.y) {
+        nearbyBucketIndices[2].y += 1;
+        nearbyBucketIndices[3].y += 1;
+        nearbyBucketIndices[6].y += 1;
+        nearbyBucketIndices[7].y += 1;
+    }
+    else
+    {
+        nearbyBucketIndices[2].y -= 1;
+        nearbyBucketIndices[3].y -= 1;
+        nearbyBucketIndices[6].y -= 1;
+        nearbyBucketIndices[7].y -= 1;
+    }
+    if ((originIndex.z + 0.5f) * CellSize <= position.z) {
+        nearbyBucketIndices[1].z += 1;
+        nearbyBucketIndices[3].z += 1;
+        nearbyBucketIndices[5].z += 1;
+        nearbyBucketIndices[7].z += 1;
+    }
+    else
+    {
+        nearbyBucketIndices[1].z -= 1;
+        nearbyBucketIndices[3].z -= 1;
+        nearbyBucketIndices[5].z -= 1;
+        nearbyBucketIndices[7].z -= 1;
+    }
+
+    for (int j = 0; j < 8; j++) {
+        int3 nbcellIndex = nearbyBucketIndices[j];
+        if (nbcellIndex.x < 0 || nbcellIndex.x >= Dimensions || nbcellIndex.y < 0 || nbcellIndex.y >= Dimensions || nbcellIndex.z < 0 || nbcellIndex.z >= Dimensions) {
+            nearbyKeys[j] = -1;
+        }
+        else {
+            nearbyKeys[j] = Hash(nearbyBucketIndices[j]);
+        }
+    }
+}
+
+[numthreads(100, 1, 1)]
+void BuildNeighbourList(uint3 id : SV_DispatchThreadID)
+{
+    _neighbourTracker[id.x] = 0;
+    const int3 cell = GetCell(_particles[id.x].position);
+    int cells[8];
+    GetNearbyKeys(cell, _particles[id.x].position, cells);
+
+    for (uint j = 0; j < 8; j++)
+    {
+        if (cells[j] == -1) continue; // Grid does not contain cell.
+        const uint numberOfParticlesInCell = min(_hashGridTracker[cells[j]], maximumParticlesPerCell); ;
+        for (uint index = 0; index < numberOfParticlesInCell; index++)
+        {
+        //GetPotentialNeighbourIndex
+            const uint potentialNeighbour = _hashGrid[cells[j] * maximumParticlesPerCell + index];
+            if (potentialNeighbour == id.x) continue;
+            const float3 v = _particles[potentialNeighbour].position - _particles[id.x].position;
+            if (dot(v, v) < radius2) // Use squared length (= dot) instead of length for performance.
+            {
+                _neighbourList[id.x * maximumParticlesPerCell * 8 + _neighbourTracker[id.x]++] = potentialNeighbour;
+            }
+        }
+    }
+    // n. The Neighbouring-list should be n-particles big, each index containing a list of each particles neighbours in radius r.
+}
+
+float Wpoly6Kernel(float distanceSquared)
+{
+    float x = 1.0f - distanceSquared / radius2;
+    return 315.f / (64.f * pi * radius3) * x * x * x;
+}
+
+
+
+[numthreads(100, 1, 1)]//合并
+void ComputeDensityPressure(uint3 id :SV_DispatchThreadID)
+{
+    float3 origin = _particles[id.x].position;
+    float sum = 0.f;
+    for (int j = 0; j < _neighbourTracker[id.x]; j++)
+    {
+        int neighbourIndex = _neighbourList[id.x * maximumParticlesPerCell * 8 + j];
+        const float3 diff = origin - _particles[neighbourIndex].position;
+        float distanceSquared = dot(diff, diff);
+        sum += Wpoly6Kernel(distanceSquared);
+    }
+
+    //computeDensity
+
+
+    _particles[id.x].density = sum * _particles[id.x].mass + 0.000001f;
+    // _particles[id.x].density = _neighbourTracker[id.x];
+
+    _particles[id.x].density = max(restDensity, _particles[id.x].density);
+    // _particles[id.x].pressure = stiffness * pow((_particles[id.x].density / restDensity - 1), 7);
+    _particles[id.x].pressure = gasConstant * (_particles[id.x].density - restDensity);
+
+}
+
+
+
+[numthreads(100, 1, 1)]//WithSmallSteps
+void ComputeWCSPHDensityPressure(uint3 id :SV_DispatchThreadID)
+{
+    float3 origin = _particles[id.x].position;
+    float sum = 0.f;
+    for (int j = 0; j < _neighbourTracker[id.x]; j++)
+    {
+        int neighbourIndex = _neighbourList[id.x * maximumParticlesPerCell * 8 + j];
+        const float3 diff = origin - _particles[neighbourIndex].position;
+        float distanceSquared = dot(diff, diff);
+        sum += Wpoly6Kernel(distanceSquared);
+    }
+
+    _particles[id.x].density = sum * _particles[id.x].mass + 0.000001f;
+    _particles[id.x].density = max(restDensity, _particles[id.x].density);
+    //_particles[id.x].pressure = gasConstant * (_particles[id.x].density - restDensity);
+    _particles[id.x].pressure = stiffness * pow((_particles[id.x].density / restDensity - 1), 7);
+
+}
+
+
+
+float SpikyKernelFirstDerivative(float distance)
+{
+    float x = 1.0f - distance / radius;
+    return -45.0f / (pi * radius4) * x * x;
+}
+
+float SpikyKernelSecondDerivative(float distance)
+{
+    float x = 1.0f - distance / radius;
+    return 90.0f / (pi * radius5) * x;
+}
+
+float3 SpikyKernelGradient(float distance, float3 directionFromCenter) {
+    return SpikyKernelFirstDerivative(distance) * directionFromCenter;
+}
+
+[numthreads(100, 1, 1)]
+void ComputeForces(uint3 id :SV_DispatchThreadID) {
+    _particles[id.x].forces = float3(0, 0, 0);
+
+    const float particleDensity2 = _particles[id.x].density * _particles[id.x].density;
+    float fluidmass2 = _particles[id.x].mass * _particles[id.x].mass;
+    for (int j = 0; j < _neighbourTracker[id.x]; j++)
+    {
+        const int neighbourIndex = _neighbourList[id.x * maximumParticlesPerCell * 8 + j];
+        const float distance = length(_particles[id.x].position - _particles[neighbourIndex].position);
+
+
+
+        if (distance > 0.0f) {
+            const float3 direction = (_particles[id.x].position - _particles[neighbourIndex].position) / distance;
+            //pressure gradient force 
+            //d//ebug
+            //Pressure
+            _particles[id.x].forces -= fluidmass2 *
+                (_particles[id.x].pressure / particleDensity2 + _particles[neighbourIndex].pressure /
+                    (_particles[neighbourIndex].density * _particles[neighbourIndex].density)) * SpikyKernelGradient(distance, direction);
+
+            //tension
+            //_particles[id.x].forces -= _particles[id.x].mass /_particles[id.x].density * SpikyKernelSecondDerivative(distance);
+
+            //viscosity
+            _particles[id.x].forces += viscosityCoefficient * fluidmass2 * ((_particles[neighbourIndex].velocity - _particles[id.x].velocity) / _particles[neighbourIndex].density) * SpikyKernelSecondDerivative(distance);
+
+        }
+    }
+    _particles[id.x].forces += gravity;
+
+}
+
+
+
+[numthreads(100, 1, 1)]
+void Integrate(uint3 id :SV_DispatchThreadID)
+{
+    Particle particle = _particles[id.x];
+    particle.velocity = _particles[id.x].velocity;
+    // float acc = dt * _particles[id.x].forces / _particles[id.x].mass;
+    _particles[id.x].velocity += dt * _particles[id.x].forces / _particles[id.x].mass;
+
+    particle.position += dt * _particles[id.x].velocity;
+
+
+    _particles[id.x].position = particle.position;
+    float3 velocity = _particles[id.x].velocity;
+
+    //Boundary
+    if (_particles[id.x].position.x - epsilon < 0.0f)
+    {
+        velocity.x *= damping;
+        particle.position.x = epsilon;
+
+    }
+    else if (_particles[id.x].position.x + epsilon > Dimensions - 1.f)
+    {
+        velocity.x *= damping;
+        particle.position.x = Dimensions - 1 - epsilon;
+    }
+    if (_particles[id.x].position.y - epsilon < 0.0f)
+    {
+        velocity.y *= damping;
+        particle.position.y = epsilon;
+
+    }
+    else if (_particles[id.x].position.y + epsilon > Dimensions - 1.f)
+    {
+        velocity.y *= damping;
+        particle.position.y = Dimensions - 1 - epsilon;
+    }
+    if (_particles[id.x].position.z - epsilon < 0.0f)
+    {
+        velocity.z *= damping;
+        particle.position.z = epsilon;
+
+    }
+    else if (_particles[id.x].position.z + epsilon > Dimensions - 1.f)
+    {
+        velocity.z *= damping;
+        particle.position.z = Dimensions - 1 - epsilon;
+    }
+
+    // particle.velocity = velocity;
+    _particles[id.x].velocity = velocity;
+    _particles[id.x].position = particle.position;
+    //_particles[id.x] = particle;
+
+}
+
