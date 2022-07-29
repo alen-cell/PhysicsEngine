@@ -1,0 +1,383 @@
+﻿// Each #kernel tells which function to compile; you can have many kernels
+#define THREADS 128
+#define GROUP_THREADS THREADS
+//#define sortRadius 256
+#define NUM_BANKS THREADS
+#define LOG_NUM_BANKS 8
+
+
+#ifdef ZERO_BANK_CONFLICTS
+#define CONFLICT_FREE_OFFSET(n) \
+    ((n) >> NUM_BANKS + (n) >> (2 * LOG_NUM_BANKS))
+#else
+#define CONFLICT_FREE_OFFSET(n) ((n) >> LOG_NUM_BANKS)
+#endif
+
+//groupshared int Localcounting[sortRadius];
+groupshared int tempArry[THREADS];
+groupshared int2 SharedData[THREADS];
+groupshared uint mask;
+groupshared uint e[THREADS];
+groupshared uint f[THREADS];
+groupshared uint destination[THREADS];
+
+RWStructuredBuffer<uint2>Data;
+RWStructuredBuffer<uint2>Temp;
+StructuredBuffer<int2>Input;
+
+RWStructuredBuffer<float2>Debug;
+
+//RWStructuredBuffer<int>BlockScanSum;
+
+uint Groups;
+uint dev;
+uint MaxDitLengthGrid;
+uint MaxDitLengthIndex;
+uint NumberOfParticles;
+uint NumberOfGrid;
+
+
+#pragma kernel Sort
+uint NumElement;
+
+
+bool getBit(uint i, uint n) {
+
+    return ((n >> i) & 1) == 1;
+
+}
+#pragma kernel Fill
+
+[numthreads(THREADS, 1, 1)]
+void Fill(uint DTid : SV_DISPATCHTHREADID) {
+
+    if (DTid < NumElement) {
+
+        Data[DTid] = Input[DTid];
+
+   }
+    else
+        Data[DTid] = 0x7FFFFFFF;
+
+}
+
+[numthreads(THREADS,1,1)]
+void Sort(uint3 Gid:SV_GroupID,
+    uint3 DTid : SV_DISPATCHTHREADID,
+    uint3 GTid : SV_GroupThreadID,
+    uint GI : SV_GroupIndex)
+{
+ 
+        int round = 0;
+    //LoadtheData
+        SharedData[GI] = Input[DTid.x];
+
+    //loop through each bit
+    [unroll(32)]
+    for (int n = 0; n < 32; n++) {
+
+        //e = 1 where nth bit = 0
+        // 
+        //计算位置为0的数的位置
+        e[GI] = getBit(n, SharedData[GI].x) == 0;
+        
+        GroupMemoryBarrierWithGroupSync();
+
+       // f[GI] = e[GI];
+       if (GI != 0) {
+            f[GI] = e[GI-1];
+
+        }
+        else {
+
+            f[GI] = 0;
+        }
+
+        GroupMemoryBarrierWithGroupSync();
+       
+
+       ///* PrefixScan
+
+     //  //    对于每一个Block求Scan
+     //  // 组内编号*/
+
+     //   uint thid = GI;
+     //   int offset = 1;
+
+     //   int ai = thid;
+     // int bi = thid + (GROUP_THREADS / 2);
+     //   //int bi = thid ;
+     //   
+     //   int bankOffsetA = CONFLICT_FREE_OFFSET(ai);
+     //  // int bankOffsetA = 0;
+     //  // int bankOffsetB = 0;
+     //   int bankOffsetB = CONFLICT_FREE_OFFSET(bi);
+
+
+     //   //tempArry[2 * thid] = f[2 * thid];
+     //   //tempArry[2 * thid+1] = f[2 * thid+1];
+
+     //   tempArry[ai + bankOffsetA] = f[ai];
+     //   tempArry[bi + bankOffsetB] = f[bi];
+
+
+     //   //localScan
+
+     // 
+     //   for (uint dr = GROUP_THREADS >> 1; dr > 0; dr >>= 1) {
+
+     //       GroupMemoryBarrierWithGroupSync();
+
+     //       if (thid < dr) {
+     //           int ai = offset * (2 * thid + 1) - 1;
+     //           int bi = offset * (2 * thid + 2) - 1;
+     //           ai += CONFLICT_FREE_OFFSET(ai);
+     //           bi += CONFLICT_FREE_OFFSET(bi);
+
+     //           tempArry[bi] += tempArry[ai];
+
+     //       }
+     //       offset *=2;
+     //   }
+     //   //存入每一组的数字之和
+
+     // //  if (thid == 0) { tempArry[GROUP_THREADS - 1 + CONFLICT_FREE_OFFSET(GROUP_THREADS - 1)] = 0; }//clear the Lastelement
+     //   if (thid == 0) { tempArry[GROUP_THREADS - 1] = 0; }//clear the Lastelement
+
+     //   for (uint d = 1; d < GROUP_THREADS; d *= 2 ) {
+     //       offset >>= 1;
+     //       GroupMemoryBarrierWithGroupSync();
+     //       if (thid < d) {
+     //           uint ai = offset * (2 * thid + 1) - 1;
+     //           uint bi = offset * (2 * thid + 2) - 1;
+     //           ai += CONFLICT_FREE_OFFSET(ai);
+     //           bi += CONFLICT_FREE_OFFSET(bi);
+     //           int t = tempArry[ai];
+     //           tempArry[ai] = tempArry[bi];
+     //           tempArry[bi] += t;
+     //         
+     //       }
+     //      
+     //   }
+     //  
+     //   GroupMemoryBarrierWithGroupSync();
+
+     //  
+     //   tempArry[GI] = tempArry[GI] + f[GI];
+
+
+     //   GroupMemoryBarrierWithGroupSync();
+     //      f[ai] = tempArry[ai + bankOffsetA];
+     //      f[bi] = tempArry[bi + bankOffsetB];
+
+     // 
+     //   GroupMemoryBarrierWithGroupSync();
+     //  
+     ///*   if (thid != THREADS-1) {
+
+     //   f[GI] = f[GI+1];
+     //   
+     //   }
+     //   else {
+
+     //       f[GI] = f[GI-1]+ e[GI- 1];
+     //   }
+     //   */
+
+     //   Debug[DTid.x].y = f[GI];
+
+
+
+ 
+
+
+    [unroll(int(log2(GROUP_THREADS)))]
+        for (uint i = 1; i < GROUP_THREADS; i <<= 1) {
+            uint temp;
+            if (GI > i)
+            {
+                temp = f[GI] + f[GI - i];
+            }
+            else {
+                temp = f[GI];
+            }
+            GroupMemoryBarrierWithGroupSync();
+            f[GI] = temp;
+            GroupMemoryBarrierWithGroupSync();
+
+            
+        }
+
+
+        if(GI == 0){
+            //if 最后一位为true，则0 的总数为 当前的 excluisive Sum+1， 下一个1的位置加1 offset
+            mask = e[GROUP_THREADS - 1] + f[GROUP_THREADS - 1];
+          //  mask =  f[GROUP_THREADS - 1];
+
+        }
+
+
+       // Debug[DTid.x].y = f[GI];
+        Debug[DTid.x].x = GI;
+        GroupMemoryBarrierWithGroupSync();
+
+
+        //if e[GI] == 0？true ,取f[gi]，否则返回 GI-f[GI]代表前面有多少个1，加上位为1的整体位置offset
+
+        destination[GI] = e[GI] ? f[GI]: GI - f[GI] + mask;
+        
+
+        uint2 temp = SharedData[GI];
+
+        GroupMemoryBarrierWithGroupSync();
+
+        SharedData[destination[GI]] = temp;
+
+        GroupMemoryBarrierWithGroupSync();
+
+   }
+
+    GroupMemoryBarrierWithGroupSync();
+
+    Data[DTid.x].x = SharedData[GI].x;
+
+    //Debug[DTid.x].y = Data[DTid.x].x;
+    //Debug[DTid.x].y = GI;
+   
+
+}
+
+uint BinarySearch( uint L,uint R,uint value) {
+    
+    if (R >= NumElement) {
+        R = NumElement - 1;
+    }
+    
+    while (L <= R) {
+
+       uint mid = (L + R) / 2;
+        if (Temp[mid].x > value) {
+            R = mid - 1;
+        }
+        else if (Temp[mid].x == value) {
+            return mid;
+        }
+        else {
+            L = mid + 1;
+        }
+    }
+    return L;
+
+}
+
+void MergeSort(uint thid, uint InsideGroupIndex, uint startA, uint endA, uint startB, uint endB) {
+
+    if (thid < NumElement) {
+
+      //  while (m > 0)
+      //  {
+
+
+           // uint m = (startA + endA) / 2;
+
+
+
+              uint m = InsideGroupIndex;
+            uint m2 = BinarySearch(startB, endB, Temp[thid].x);
+            uint q3 = startA + (m - startA) + (m2 - startB);
+
+
+            uint Localoffset = m + m2;
+            // uint GlobalIndex = startA + Localoffset;
+
+            Data[q3] = Temp[thid];
+
+
+            Debug[thid].y = q3;
+
+            //MergeSort(thid, InsideGroupIndex, startA,m,m+1,)
+
+        //}
+    }
+}
+
+
+
+
+#pragma kernel Merge
+[numthreads(THREADS, 1, 1)]
+void Merge(uint3 Gid:SV_GroupID,
+    uint3 DTid : SV_DISPATCHTHREADID,
+    uint3 GTid : SV_GroupThreadID,
+    uint GI : SV_GroupIndex) {
+
+  
+   
+    uint thid = DTid.x;
+    uint stride = THREADS;
+   // for (uint stride = THREADS; stride *= 2; stride < NumElement) {
+       
+        
+        Temp[thid] = Data[thid];
+
+        GroupMemoryBarrierWithGroupSync();
+       
+        Debug[thid].x = Temp[thid].x;
+        uint ListIndex = (int)thid /stride;//List index
+      
+       //A组内偏移
+        
+
+        if (ListIndex % 2 == 0) {//选择组线程为2的倍数List进行二分法查找    如第0组，第2组，第四组
+
+            uint ListIndexB = ListIndex + 1;//分为AB两组，A为当前组，B为后一组          
+            //||A A A A A || B B B B B||
+             // for each A-> search B 
+           // return Index m in B
+            uint indexB = thid + stride;
+            uint indexA = thid;
+            uint InsideGroupIndex = thid - stride * ListIndex;
+
+            uint startA = ListIndex * stride;
+           
+            
+          
+            uint endA = startA + stride - 1;
+            uint startB = endA + 1;
+            uint endB = startB+ stride - 1;
+
+           // Debug[thid].x = endB;
+
+            MergeSort(thid, InsideGroupIndex, startA, endA, startB, endB);
+            GroupMemoryBarrierWithGroupSync();
+
+
+
+           // Debug[thid].y = Data[thid].x;
+       // }
+
+
+
+
+    }
+
+
+
+
+   
+
+}
+
+  
+
+
+
+
+
+
+
+    // TODO: insert actual code here!
+
+
+
+
