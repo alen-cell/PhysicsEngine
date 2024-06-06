@@ -8,8 +8,13 @@ This is the start of simulating the World!
 pbd in **Physics_Engine_3_PBDCouple_Scene\Assets\PBDSolver\PBDFluidCouple.unity**
 
 ![lQLPJxaKRWGAVM7M180BebBzO25sVtgskgLjnAscwKEA_377_215](https://user-images.githubusercontent.com/64120028/181718091-a01ed29f-4e9e-4bee-8d3f-3439912a2901.png)
-100,000 particles ----30-40fps
-50,000 paricles ------110-150fps
+
+| num of particles | Frames | 
+|-------|-------|
+| 100,000 particles | 30-40fps | 
+| 50,000 paricles| 110-150fps | 
+
+
 
 Particle+volume
 ![屏幕截图 2024-06-06 164034](https://github.com/alen-cell/PhysicsEngine/assets/64120028/18d69d87-a4b8-4267-b2f2-f0e30c641b94)
