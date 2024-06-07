@@ -1,0 +1,75 @@
+﻿float HashScale;
+float3 HashSize;
+float3 HashTranslate;
+
+
+//RWStructuredBuffer<int2>IndexMap;
+//RWStructuredBuffer<int2>Table;
+
+int3 HashIndex(float3 p){
+	p = (p-HashTranslate)*HashScale;
+	return clamp(p,0,HashSize -1);
+}
+
+float KernelRadius;
+float KernelRadius2;
+
+float Poly6Zero;
+float POLY6;
+
+float Pow3(float v){
+
+return v*v*v;
+}
+float Poly6Kernel(float distanceSpr)
+
+{
+return POLY6*Pow3(KernelRadius2-distanceSpr);
+
+}
+float Wpoly6Kernel(float distanceSqr)
+{
+  
+   return pow(KernelRadius2-distanceSqr,3)*POLY6;
+}
+
+#define THREADS 128
+#define PI 3.14159265359
+
+RWStructuredBuffer<float4> Boundary;
+
+float Density;
+int NumParticles;
+
+float DistanceSquare(float3 a,float b ){
+		float3 deltaPosition = a-b;
+		return dot(deltaPosition,deltaPosition);
+}
+
+float Compute(int id,float3 selfPosition)
+{
+int3 hashIndex = HashIndex(selfPosition);
+int3 size = HashSize;
+float delta = Wpoly6Kernel(0);
+
+
+float volume = 1.0f/delta;
+return Density*volume;
+
+}
+
+
+#pragma kernel ComputePsi
+[numthreads(THREADS,1,1)]
+void ComputePsi(int id:SV_DispatchThreadID){
+
+if (id < NumParticles)
+	{
+	float3 position = Boundary[id].xyz;
+	float psi = Compute(id,position);
+
+	Boundary[id].w = psi;
+}
+
+
+}

@@ -1,0 +1,466 @@
+﻿
+float HashScale;
+float3 HashSize;
+float3 HashTranslate;
+float KernelRadius;
+float KernelRadius2;
+
+float POLY6ZERO;
+float POLY6;
+float SPIKY_GRAD;
+float VISC_LAP;
+
+
+#define PI  3.1415926
+#define InvPI 0.31831
+#define THREADS 128
+RWStructuredBuffer<int2> IndexMap;
+RWStructuredBuffer<int2> Table;
+//kernelFunction
+
+float Pow2(float v)
+{
+	return v * v;
+}
+
+float Pow3(float v)
+{
+	return v * v * v;
+}
+float Wpoly6Kernel(float distanceSqr)
+{
+  
+   return Pow3(KernelRadius2-distanceSqr)*POLY6;
+}
+
+//∇Wspiky(r,h)
+float3 SpikyGradKernel(float3 p,float distanceSqr)
+{
+    float r = sqrt(distanceSqr);
+    return (p/r)*SPIKY_GRAD*(Pow2(KernelRadius-r));
+   
+}
+
+
+//∇2W(r,h) = 45/πh6 (h−r)
+
+float ViscLapKernel(float distanceSqr)
+{
+    float r = sqrt(distanceSqr);
+    return VISC_LAP*(KernelRadius-r);
+}
+
+int3 HashIndex(float3 p)
+{
+	p = (p - HashTranslate) * HashScale;
+	return clamp(p, 0, HashSize - 1);
+}
+
+RWStructuredBuffer<float4> DebugBuffer;
+RWStructuredBuffer<float4> Positions;
+RWStructuredBuffer<float4> Predicted;
+RWStructuredBuffer<float4> Velocities;
+RWStructuredBuffer<float> Densities;
+//RWStructuredBuffer<float> Pressures;
+
+RWStructuredBuffer<float> Lambda;
+
+StructuredBuffer<float4> Boundary;
+//#ifdef COUPLE
+//RWStructuredBuffer<float4> SolidParPositions;
+//#endif
+
+
+float3 gravity;
+float damping;
+float density0;
+float viscosity;
+float fluidmass;
+int NumParticles;
+float deltaTime;
+float invDensity0;
+//Boundary attributes
+float solidPressure;
+float solidmass;
+//float invSolidDensity;
+
+float3 Velocity(int i){
+
+float3 velocity = Velocities[i].xyz;
+    velocity -= velocity*damping*deltaTime;
+    velocity += deltaTime*gravity;
+    return velocity;
+
+}
+
+float3 predictPositions(int i, float3 velocity) {
+
+
+    return Positions[i].xyz + deltaTime * velocity;
+
+
+}
+
+
+#pragma kernel PredictPositions
+[numthreads(THREADS,1,1)]
+void PredictPositions (int id : SV_DispatchThreadID)
+{
+
+        
+    if(id < NumParticles)
+    {
+        float3 velocity = Velocity(id);
+        float3 posPredicted = predictPositions(id,velocity);
+
+        Velocities[id] = float4(velocity,0);
+        Predicted[id] = float4(posPredicted,0);
+    
+    }
+
+   
+}
+#define LOOP_START\
+[unroll] \
+for(int k = -1;k<=1;k++)\
+{\
+[unroll]\
+for(int j = -1;j<=1;j++)\
+{\
+[unroll]\
+for(int i = -1;i<=1;i++)\
+{\
+
+#define LOOP_END\
+}}}\
+
+
+
+
+
+void ComputeDensityAndPressure(int id, float3 selfPosition,out float density_i, out float lambda_i)
+{
+    float MassMulInvDensity = fluidmass*invDensity0;
+    
+    lambda_i = 0;
+    //float pressure_i = 0;
+    density_i = fluidmass*Wpoly6Kernel(0);
+    //sum of the 2 level of norm of graient to C;
+    float sigma_grad_C2 = 0.0f;
+    //gradient Ci respect to pk
+    float3 nabla_Ci = 0.0f;
+
+    int3 hashIndex = HashIndex(selfPosition);
+    int3 size = HashSize;
+    int sizexy = size.x*size.y;
+    //取上下左右27个格子内的hash值的粒子
+
+    LOOP_START
+
+    int xi = hashIndex.x+i;
+    int yj = hashIndex.y+j;
+    int zk = hashIndex.z+k;
+
+    if(xi<0||xi >=size.x)continue;
+    if(yj<0||yj >=size.y)continue;
+    if(zk<0||zk >=size.z)continue;
+
+    int hash = xi+yj*size.x+zk*sizexy;
+    int2 bounds = Table[hash];
+
+   
+    //遍历邻居粒子
+    for(int idx = bounds.x; idx <= bounds.y;idx++){
+        
+        int n = IndexMap[idx].y;
+        if (n == id) continue;
+        //n<NumParticles,return 1;n>NumParticles,return 0;
+        // int isFluid = 1-step(n,NumParticles);
+      //  int isFluid = 1-step(n,NumParticles);
+        //int BinaryIndex = n*isFluid + (n-NumParticles)*(1-isFluid);
+
+
+        float psi;
+        float distanceSqr;
+        float3 deltaPosition;
+
+        if(n<NumParticles)
+        {
+         deltaPosition = selfPosition - Predicted[n].xyz;
+         distanceSqr = dot(deltaPosition,deltaPosition);
+        }
+
+        else{
+        
+            int m = n-NumParticles;
+          
+            deltaPosition = selfPosition.xyz - Boundary[m].xyz;
+            distanceSqr = dot(deltaPosition,deltaPosition);
+            psi = Boundary[m].w;
+           // Pressures[id] = psi;
+        }
+        if (distanceSqr >= KernelRadius2) continue;
+
+        if (n < NumParticles)
+		{
+
+            density_i += fluidmass*Wpoly6Kernel(distanceSqr);
+        //∇pkCi =1/ρ0 *∑j∇pkW(pi −pj,h)        //nabla_ci
+            float3 nabla_Cj = -MassMulInvDensity*SpikyGradKernel(deltaPosition,distanceSqr);
+
+            sigma_grad_C2 += dot(nabla_Cj,nabla_Cj);
+
+            nabla_Ci -= nabla_Cj;
+
+
+
+       //TODO计算粒子所受压强
+               
+       //TODO计算粒子所受adhesion
+     
+        }
+      
+       else{  
+                
+               density_i += psi*Wpoly6Kernel(distanceSqr);
+               float3 nabla_Cj =  -psi*invDensity0*SpikyGradKernel(deltaPosition,distanceSqr);
+               sigma_grad_C2 += dot(nabla_Cj,nabla_Cj);
+               nabla_Ci -= nabla_Cj;
+               
+
+               //TODO计算固体粒子所受力
+ 
+
+            }
+        }
+    
+    LOOP_END
+        float Ci = density_i * invDensity0 - 1.0f;           
+        sigma_grad_C2 += dot(nabla_Ci, nabla_Ci);
+        float e = 60.0f;
+        lambda_i = - max(0,Ci)/ (sigma_grad_C2 + e);
+               // lambda_i = 0.2;
+        
+ 
+          //  Pressures[id] = Ci;
+
+}
+
+
+#pragma kernel ComputeDensity
+[numthreads(THREADS, 1, 1)]
+void ComputeDensity(int id : SV_DispatchThreadID)
+{
+    if (id < NumParticles){
+	
+       float3 pos =  Predicted[id].xyz;
+        float density_i,lambda_i;
+        ComputeDensityAndPressure(id,pos,density_i,lambda_i);
+        
+        Densities[id] = density_i; 
+        Lambda[id] = lambda_i;
+       // Pressures[id] = Lambda[id];
+        }
+
+}
+
+float3 SolveDensity(int id,float3 selfPosition,float lambda_i)
+{
+    float scorr = 0;
+    float scorr_k = 4;
+    float delta_q = 0.3;
+    int scorr_n = 4;
+    float invDensity0= 1.0f/  density0;
+   
+    float3 delta_p =float3(0,0,0);
+    
+    float MassMulInvDensity = fluidmass*invDensity0;
+    
+    int3 hashIndex = HashIndex(selfPosition);
+    int3 size = HashSize;
+    int sizexy = size.x*size.y;
+
+   float lambda_j = 0;
+   float numerator  = 0;
+    float denominator  = 0;
+    float3 denominatorTempSum = float3(0,0,0);
+    float numeratorTerpSum = 0;
+    LOOP_START
+    int xi = hashIndex.x + i;
+    int yj = hashIndex.y + j;
+    int zk = hashIndex.z + k;
+
+
+    if(xi<0||xi >=size.x)continue;
+    if(yj<0||yj >=size.y)continue;
+    if(zk<0||zk >=size.z)continue;
+
+    int hash = xi +yj*size.x+zk*sizexy;
+    int2 bounds = Table[hash];
+
+    for(int idx = bounds.x;idx<= bounds.y;idx++){
+        int n = IndexMap[idx].y;
+        if(n == id )continue;
+          
+          float3 deltaPosition;
+          float distanceSqr;
+          float psi;
+         if(n<NumParticles)
+        {
+        deltaPosition = selfPosition - Predicted[n].xyz;
+        distanceSqr = dot(deltaPosition,deltaPosition); 
+       }
+         else{
+            int m = n-NumParticles;  
+            deltaPosition = selfPosition.xyz-Boundary[m].xyz;;
+            distanceSqr = dot(deltaPosition,deltaPosition);  
+           
+           // psi = 20;
+            psi = Boundary[m].w;
+          
+            }
+
+        if (distanceSqr >= KernelRadius2) continue;
+
+
+        float3 gradW = SpikyGradKernel(deltaPosition,distanceSqr);
+        if(n<NumParticles)
+        {
+
+        //解
+         //lambda_j = Lambda[n];
+         numerator  = Wpoly6Kernel(distanceSqr);
+        float denominator = Wpoly6Kernel(delta_q);
+
+        float scorr = -scorr_k *pow(numerator/denominator,scorr_n);
+       
+         delta_p -= -MassMulInvDensity*(lambda_i + Lambda[n]+ 0)*gradW;
+ 
+         }
+    //计算固体粒子的约束
+       
+         else{
+  
+        
+            delta_p -= -psi* lambda_i *invDensity0*gradW;
+        
+
+            }
+        }
+    LOOP_END
+
+   
+   return delta_p;
+   
+
+
+}
+
+
+
+#pragma kernel SolveConstraint
+
+[numthreads(THREADS, 1, 1)]
+void SolveConstraint (int id : SV_DispatchThreadID)
+{
+    if(id < NumParticles){
+       float3 pi = Predicted[id].xyz;
+       float lambda_i = Lambda[id];
+       pi += SolveDensity(id,pi,lambda_i);
+       Predicted[id] = float4(pi,0);
+    // Pressures[id] = SolveDensity(id, pi, lambda_i);
+    }   
+    
+    
+}
+
+
+
+#pragma kernel UpdateVelocities
+
+[numthreads(THREADS,1,1)]
+void UpdateVelocities(int id:SV_DispatchThreadID){
+
+    if(id < NumParticles){
+        float4 p = Positions[id];
+        float4 pi = Predicted[id];
+
+        float4 velocity = (pi-p)/deltaTime;
+        Velocities[id]= velocity;
+    
+    }
+   
+
+}
+
+float3 ComputeViscosity(int id,float3 selfPosition){
+
+
+   float viscosityMulMass = viscosity*fluidmass;
+   int3 hashIndex = HashIndex(selfPosition);
+	int3 size = HashSize;
+	float sizexy = size.x * size.y;
+    
+    float3 velocity = Velocities[id].xyz;
+    LOOP_START
+
+	int xi = hashIndex.x + i;
+	int yj = hashIndex.y + j;
+	int zk = hashIndex.z + k;
+
+    if (xi < 0 || xi >= size.x) continue;
+	if (yj < 0 || yj >= size.y) continue;
+	if (zk < 0 || zk >= size.z) continue;
+
+    int hash = xi + yj * size.x + zk * sizexy;
+	int2 bounds = Table[hash];
+
+    for (int idx = bounds.x; idx <= bounds.y; idx++)
+	{
+        int n = IndexMap[idx].y;
+        if (n == id || n >= NumParticles) continue;
+        
+        
+        float3 deltaPosition = selfPosition - Predicted[n].xyz;
+        float distanceSqr = dot(deltaPosition,deltaPosition);
+        if (distanceSqr >= KernelRadius2) continue;
+        
+        float invDensity = 1.0f/Densities[n];
+        float v = ViscLapKernel(distanceSqr)*viscosityMulMass*invDensity;
+        velocity -= v*(velocity-Velocities[n].xyz);
+
+    }
+
+    LOOP_END
+    return velocity;
+
+
+   
+}
+
+#pragma kernel SolveViscosity
+[numthreads(THREADS,1,1)]
+void SolveViscosity(int id:SV_DispatchThreadID){
+    if(id<NumParticles)
+    {
+        float3 pi = Predicted[id].xyz;
+       float3 velocity = ComputeViscosity(id,pi);
+
+        Velocities[id] = float4(velocity,0);
+    }
+
+}
+
+
+#pragma kernel UpdatePositions
+[numthreads(THREADS,1,1)]
+void UpdatePositions(int id:SV_DispatchThreadID){
+    if(id<NumParticles)
+    {
+
+    Positions[id] = Predicted[id];
+
+    }
+  
+
+}

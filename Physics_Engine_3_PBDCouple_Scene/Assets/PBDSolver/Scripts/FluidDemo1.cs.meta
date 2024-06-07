@@ -1,0 +1,17 @@
+fileFormatVersion: 2
+guid: 8732dd87f85e8d149835a9fee03f30b3
+MonoImporter:
+  externalObjects: {}
+  serializedVersion: 2
+  defaultReferences:
+  - m_fluidParticleMat: {fileID: 2100000, guid: 63e36c1afe7c9d74a8568fb03b54f42c,
+      type: 2}
+  - m_boundaryParticleMat: {fileID: 2100000, guid: 0a07818b7629b624a932889b6d2d2ad7,
+      type: 2}
+  - m_volumeMat: {fileID: 2100000, guid: 32d2cd031f252b04b88a55d7d051391d, type: 2}
+  - m_sphereMesh: {fileID: 10207, guid: 0000000000000000e000000000000000, type: 0}
+  executionOrder: 0
+  icon: {instanceID: 0}
+  userData: 
+  assetBundleName: 
+  assetBundleVariant: 
