@@ -23,9 +23,9 @@ Particle+volume
 
 
 ![bandicam 2025-02-28 10-24-32-867 (2)](https://github.com/user-attachments/assets/1705e552-c7df-404b-8e4c-058b333d159a)
-after adding Vorticity
-![bandicam 2025-03-01 12-34-19-060](https://github.com/user-attachments/assets/39581acf-a8ec-4e3a-a20e-d877fc1387b0)
-using Unity plugin。but its effect is not good
+//after adding Vorticity
+![bandicam 2025-03-01 13-34-34-318](https://github.com/user-attachments/assets/cb6626d6-e8d8-496a-ab60-8edc8133142a)
+//using Unity plugin。but its effect is not good
 
 ![屏幕截图 2024-06-06 164034](https://github.com/alen-cell/PhysicsEngine/assets/64120028/18d69d87-a4b8-4267-b2f2-f0e30c641b94)
 
